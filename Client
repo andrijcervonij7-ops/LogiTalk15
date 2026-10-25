@@ -1,0 +1,494 @@
+import base64
+import io
+import os
+import threading
+from socket import socket, AF_INET, SOCK_STREAM
+
+from customtkinter import *
+from tkinter import filedialog
+from PIL import Image
+
+HOST = 'localhost'
+PORT = 8080
+
+
+class MainWindow(CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.geometry('400x300')
+        self.title("Chat Client")
+
+        self.username = "new user"
+
+        # Історія повідомлень поточного сеансу
+        self.chat_history = []
+        self.sock = None
+        self.chat_widgets = []
+
+        # Меню
+        self.label = None
+        self.menu_frame = CTkFrame(self, width=30, height=300)
+        self.menu_frame.pack_propagate(False)
+        self.menu_frame.place(x=0, y=0)
+
+        self.is_show_menu = False
+        self.speed_animate_menu = -20
+
+        self.btn = CTkButton(
+            self,
+            text='▶',
+            command=self.toggle_show_menu,
+            width=30
+        )
+        self.btn.place(x=0, y=0)
+
+        # Пошук повідомлень
+        self.search_entry = CTkEntry(
+            self,
+            placeholder_text='Пошук в історії...'
+        )
+        self.search_entry.bind(
+            '<Return>',
+            lambda event: self.search_messages()
+        )
+
+        self.search_button = CTkButton(
+            self,
+            text='🔍',
+            width=40,
+            command=self.search_messages
+        )
+
+        self.all_button = CTkButton(
+            self,
+            text='Усі',
+            width=40,
+            command=self.show_all_messages
+        )
+
+        # Основне поле чату
+        self.chat_field = CTkScrollableFrame(self)
+        self.chat_field.place(x=0, y=40)
+
+        # Поле введення
+        self.message_entry = CTkEntry(
+            self,
+            placeholder_text='Введіть повідомлення:',
+            height=40
+        )
+        self.message_entry.bind(
+            '<Return>',
+            lambda event: self.send_message()
+        )
+
+        self.send_button = CTkButton(
+            self,
+            text='>',
+            width=50,
+            height=40,
+            command=self.send_message
+        )
+
+        self.open_img_button = CTkButton(
+            self,
+            text='📷',
+            width=50,
+            height=40,
+            command=self.open_image
+        )
+
+        self.adaptive_ui()
+
+        # Підключення до сервера
+        try:
+            self.sock = socket(AF_INET, SOCK_STREAM)
+            self.sock.connect((HOST, PORT))
+
+            hello = (
+                f"TEXT@{self.username}@"
+                f"SYSTEM {self.username} приєднався(лась) до чату!\n"
+            )
+            self.sock.sendall(hello.encode('utf-8'))
+
+            threading.Thread(
+                target=self.recv_message,
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            self.add_message(
+                f"Не вдалося підключитися до сервера: {e}"
+            )
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def toggle_show_menu(self):
+        if self.is_show_menu:
+            self.is_show_menu = False
+            self.speed_animate_menu = -20
+            self.btn.configure(text='▶')
+            self.show_menu()
+        else:
+            self.is_show_menu = True
+            self.speed_animate_menu = 20
+            self.btn.configure(text='◀')
+
+            if self.label is None:
+                self.label = CTkLabel(
+                    self.menu_frame,
+                    text="Ім'я"
+                )
+                self.label.pack(pady=30)
+
+                self.entry = CTkEntry(
+                    self.menu_frame,
+                    placeholder_text="Ваш нік..."
+                )
+                self.entry.pack()
+
+                self.save_button = CTkButton(
+                    self.menu_frame,
+                    text="Зберегти",
+                    command=self.save_name
+                )
+                self.save_button.pack(pady=10)
+
+            self.show_menu()
+
+    def show_menu(self):
+        current_width = self.menu_frame.winfo_width()
+        target_width = 200 if self.is_show_menu else 30
+
+        new_width = current_width + self.speed_animate_menu
+
+        if self.is_show_menu:
+            new_width = min(new_width, target_width)
+        else:
+            new_width = max(new_width, target_width)
+
+        self.menu_frame.configure(width=new_width)
+
+        if new_width != target_width:
+            self.after(10, self.show_menu)
+        else:
+            if not self.is_show_menu:
+                if self.label is not None:
+                    self.label.destroy()
+                    self.label = None
+
+                if hasattr(self, 'entry'):
+                    self.entry.destroy()
+                    del self.entry
+
+                if hasattr(self, 'save_button'):
+                    self.save_button.destroy()
+                    del self.save_button
+
+    def save_name(self):
+        new_name = self.entry.get().strip()
+
+        if new_name:
+            self.username = new_name
+            self.add_message(f"Ваш новий нік: {self.username}")
+
+    def adaptive_ui(self):
+        if not self.winfo_exists():
+            return
+
+        window_width = self.winfo_width()
+        window_height = self.winfo_height()
+        menu_width = self.menu_frame.winfo_width()
+
+        # Пошук у верхній частині
+        self.search_entry.place(x=menu_width + 35, y=5)
+        self.search_entry.configure(
+            width=max(80, window_width - menu_width - 145)
+        )
+
+        self.search_button.place(
+            x=window_width - 100,
+            y=5
+        )
+
+        self.all_button.place(
+            x=window_width - 55,
+            y=5
+        )
+
+        # Поле чату
+        self.chat_field.place(
+            x=menu_width,
+            y=40
+        )
+        self.chat_field.configure(
+            width=max(100, window_width - menu_width - 20),
+            height=max(80, window_height - 85)
+        )
+
+        # Введення повідомлення
+        self.send_button.place(
+            x=window_width - 50,
+            y=window_height - 40
+        )
+
+        self.open_img_button.place(
+            x=window_width - 105,
+            y=window_height - 40
+        )
+
+        self.message_entry.place(
+            x=menu_width,
+            y=window_height - 40
+        )
+        self.message_entry.configure(
+            width=max(50, window_width - menu_width - 165)
+        )
+
+        self.menu_frame.configure(height=window_height)
+
+        self.after(100, self.adaptive_ui)
+
+    def add_message(self, message, img=None, save_history=True):
+        # Зберігаємо оригінальне повідомлення в історії
+        if save_history:
+            self.chat_history.append({
+                "text": message,
+                "img": img
+            })
+
+        message_frame = CTkFrame(
+            self.chat_field,
+            fg_color='grey'
+        )
+        message_frame.pack(
+            pady=5,
+            padx=5,
+            anchor='w'
+        )
+
+        wraplength_size = max(
+            100,
+            self.winfo_width() - self.menu_frame.winfo_width() - 60
+        )
+
+        label = CTkLabel(
+            message_frame,
+            text=message,
+            wraplength=wraplength_size,
+            text_color='white',
+            justify='left',
+            image=img,
+            compound='top' if img else 'none'
+        )
+        label.pack(padx=10, pady=5)
+
+        self.chat_widgets.append(message_frame)
+
+    def clear_chat_display(self):
+        for widget in self.chat_field.winfo_children():
+            widget.destroy()
+
+        self.chat_widgets.clear()
+
+    def search_messages(self):
+        query = self.search_entry.get().strip().casefold()
+
+        if not query:
+            self.show_all_messages()
+            return
+
+        self.clear_chat_display()
+
+        results = [
+            message for message in self.chat_history
+            if query in message["text"].casefold()
+        ]
+
+        if not results:
+            self.add_message(
+                f"За запитом «{query}» нічого не знайдено.",
+                save_history=False
+            )
+            return
+
+        self.add_message(
+            f"Результати пошуку: {len(results)}",
+            save_history=False
+        )
+
+        for message in results:
+            self.add_message(
+                message["text"],
+                img=message["img"],
+                save_history=False
+            )
+
+    def show_all_messages(self):
+        self.clear_chat_display()
+
+        for message in self.chat_history:
+            self.add_message(
+                message["text"],
+                img=message["img"],
+                save_history=False
+            )
+
+    def send_message(self):
+        message = self.message_entry.get().strip()
+
+        if not message:
+            return
+
+        if self.sock is None:
+            self.add_message("Немає підключення до сервера.")
+            return
+
+        try:
+            data = f"TEXT@{self.username}@{message}\n"
+            self.sock.sendall(data.encode('utf-8'))
+
+            self.add_message(f"{self.username}: {message}")
+            self.message_entry.delete(0, END)
+
+        except Exception as e:
+            self.add_message(f"Помилка надсилання: {e}")
+
+    def recv_message(self):
+        buffer = ""
+
+        while True:
+            try:
+                chunk = self.sock.recv(4096)
+
+                if not chunk:
+                    break
+
+                buffer += chunk.decode(
+                    'utf-8',
+                    errors='ignore'
+                )
+
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+
+                    if line.strip():
+                        # Tkinter потрібно оновлювати з головного потоку
+                        self.after(
+                            0,
+                            self.handle_line,
+                            line.strip()
+                        )
+
+            except Exception:
+                break
+
+    def handle_line(self, line):
+        if not line:
+            return
+
+        parts = line.split('@', 3)
+        msg_type = parts[0]
+
+        if msg_type == "TEXT":
+            if len(parts) >= 3:
+                author = parts[1]
+                message = parts[2]
+
+                self.add_message(f"{author}: {message}")
+
+        elif msg_type == "IMAGE":
+            if len(parts) >= 4:
+                author = parts[1]
+                filename = parts[2]
+                b64_img = parts[3]
+
+                try:
+                    img_data = base64.b64decode(b64_img)
+                    pil_img = Image.open(
+                        io.BytesIO(img_data)
+                    ).copy()
+
+                    ctk_img = CTkImage(
+                        light_image=pil_img,
+                        dark_image=pil_img,
+                        size=(300, 300)
+                    )
+
+                    self.add_message(
+                        f"{author} надіслав(ла) зображення: {filename}",
+                        img=ctk_img
+                    )
+
+                except Exception as e:
+                    self.add_message(
+                        f"Помилка відображення зображення: {e}"
+                    )
+        else:
+            self.add_message(line)
+
+    def open_image(self):
+        file_name = filedialog.askopenfilename(
+            title="Виберіть зображення",
+            filetypes=[
+                ("Зображення", "*.png *.jpg *.jpeg *.gif *.bmp"),
+                ("Усі файли", "*.*")
+            ]
+        )
+
+        if not file_name:
+            return
+
+        if self.sock is None:
+            self.add_message("Немає підключення до сервера.")
+            return
+
+        try:
+            with open(file_name, "rb") as f:
+                raw = f.read()
+
+            b64_data = base64.b64encode(raw).decode('ascii')
+            short_name = os.path.basename(file_name)
+
+            data = (
+                f"IMAGE@{self.username}@"
+                f"{short_name}@{b64_data}\n"
+            )
+
+            self.sock.sendall(data.encode('utf-8'))
+
+            pil_img = Image.open(file_name).copy()
+            ctk_img = CTkImage(
+                light_image=pil_img,
+                dark_image=pil_img,
+                size=(300, 300)
+            )
+
+            self.add_message(
+                f"{self.username} надіслав(ла) зображення: {short_name}",
+                img=ctk_img
+            )
+
+        except Exception as e:
+            self.add_message(
+                f"Не вдалося надіслати зображення: {e}"
+            )
+
+    def on_close(self):
+        if self.sock is not None:
+            try:
+                self.sock.shutdown(1)
+            except OSError:
+                pass
+
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+
+        self.destroy()
+
+
+if __name__ == "__main__":
+    win = MainWindow()
+    win.mainloop()
